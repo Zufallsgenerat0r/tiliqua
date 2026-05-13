@@ -62,6 +62,25 @@ impl Timebase {
     }
 }
 
+#[cfg(feature = "auto_timebase")]
+pub const AUTO_TIMEBASE_MIN_PERIOD_SAMPLES: u32 = 8;
+
+#[cfg(feature = "auto_timebase")]
+pub fn auto_timebase_period_samples(raw_period: u32, fs_up: u32) -> u32 {
+    let max_period_samples =
+        auto_timebase_max_period_samples(fs_up).max(AUTO_TIMEBASE_MIN_PERIOD_SAMPLES);
+
+    raw_period
+        .max(AUTO_TIMEBASE_MIN_PERIOD_SAMPLES)
+        .min(max_period_samples)
+}
+
+#[cfg(feature = "auto_timebase")]
+fn auto_timebase_max_period_samples(fs_up: u32) -> u32 {
+    let max_screen_us = Timebase::Timebase500ms.t_div_us().unwrap_or(0) * 10;
+    ((fs_up as u64 * max_screen_us) / 1_000_000).min(u32::MAX as u64) as u32
+}
+
 #[derive(Default, Clone, Copy, PartialEq, EnumIter, IntoStaticStr, Serialize, Deserialize)]
 #[strum(serialize_all = "kebab-case")]
 pub enum VScale {
@@ -96,5 +115,19 @@ impl VScale {
             VScale::Scale125mV => 3,
             VScale::Scale64mV  => 2,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "auto_timebase")]
+    use super::*;
+
+    #[cfg(feature = "auto_timebase")]
+    #[test]
+    fn auto_timebase_preserves_one_hz_period_at_scope_sample_rate() {
+        let fs_up = 1_536_000;
+
+        assert_eq!(auto_timebase_period_samples(fs_up, fs_up), fs_up);
     }
 }

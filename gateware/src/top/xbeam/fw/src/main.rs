@@ -350,7 +350,10 @@ fn main() -> ! {
                     last_trigger_count = tc;
                     if fresh {
                         stale_loops = 0;
-                        let clamped = raw_period.clamp(8, scope.fs_up() / 2);
+                        let clamped = tiliqua_lib::scope::auto_timebase_period_samples(
+                            raw_period,
+                            scope.fs_up(),
+                        );
                         smoothed_period = if smoothed_period == 0 {
                             clamped
                         } else {
