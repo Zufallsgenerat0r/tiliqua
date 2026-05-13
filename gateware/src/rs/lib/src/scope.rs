@@ -4,6 +4,8 @@ use strum_macros::{EnumIter, IntoStaticStr};
 #[derive(Default, Clone, Copy, PartialEq, EnumIter, IntoStaticStr, Serialize, Deserialize)]
 #[strum(serialize_all = "kebab-case")]
 pub enum Timebase {
+    #[strum(serialize = "auto")]
+    Auto,
     #[strum(serialize = "500ms/d")]
     Timebase500ms,
     #[strum(serialize = "200ms/d")]
@@ -34,22 +36,24 @@ pub enum Timebase {
 }
 
 impl Timebase {
-    /// Return the time per division in microseconds.
-    pub fn t_div_us(&self) -> u64 {
+    /// Return the time per division in microseconds, or None for `Auto`
+    /// (which is driven from a runtime period measurement, not a fixed value).
+    pub fn t_div_us(&self) -> Option<u64> {
         match self {
-            Timebase::Timebase500ms => 500_000,
-            Timebase::Timebase200ms => 200_000,
-            Timebase::Timebase100ms => 100_000,
-            Timebase::Timebase50ms  => 50_000,
-            Timebase::Timebase20ms  => 20_000,
-            Timebase::Timebase10ms  => 10_000,
-            Timebase::Timebase5ms   => 5_000,
-            Timebase::Timebase2ms   => 2_000,
-            Timebase::Timebase1ms   => 1_000,
-            Timebase::Timebase500us => 500,
-            Timebase::Timebase200us => 200,
-            Timebase::Timebase100us => 100,
-            Timebase::Timebase50us  => 50,
+            Timebase::Auto          => None,
+            Timebase::Timebase500ms => Some(500_000),
+            Timebase::Timebase200ms => Some(200_000),
+            Timebase::Timebase100ms => Some(100_000),
+            Timebase::Timebase50ms  => Some(50_000),
+            Timebase::Timebase20ms  => Some(20_000),
+            Timebase::Timebase10ms  => Some(10_000),
+            Timebase::Timebase5ms   => Some(5_000),
+            Timebase::Timebase2ms   => Some(2_000),
+            Timebase::Timebase1ms   => Some(1_000),
+            Timebase::Timebase500us => Some(500),
+            Timebase::Timebase200us => Some(200),
+            Timebase::Timebase100us => Some(100),
+            Timebase::Timebase50us  => Some(50),
         }
     }
 }

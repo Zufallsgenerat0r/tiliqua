@@ -219,6 +219,14 @@ fn main() -> ! {
 
     let mut delay_smoothers = [OnePoleSmoother::new(0.05f32); 4];
 
+    // Auto-timebase state. Owned here (not persisted): recomputed each loop.
+    // Integer EMA is used instead of OnePoleSmoother because period samples
+    // at fs_up can exceed 32768, which overflows the 16-bit-integer Fix type.
+    let mut last_trigger_count: u32 = 0;
+    let mut stale_loops: u32 = 0;
+    let mut smoothed_period: u32 = 0;
+    const STALE_THRESHOLD: u32 = 50;
+
     irq::scope(|s| {
 
         s.register(handlers::Interrupt::TIMER0, timer0);
@@ -323,7 +331,31 @@ fn main() -> ! {
                 XZoom::Double => 5,
             };
             scope.set_xscale(xscale_bits);
-            scope.set_timebase(opts.scope2.timebase.value);
+            match opts.scope2.timebase.value {
+                Timebase::Auto => {
+                    let tc = scope.trigger_count();
+                    let raw_period = scope.measured_period_samples();
+                    let fresh = tc != last_trigger_count;
+                    last_trigger_count = tc;
+                    if fresh {
+                        stale_loops = 0;
+                        let clamped = raw_period.clamp(8, scope.fs_up() / 2);
+                        smoothed_period = if smoothed_period == 0 {
+                            clamped
+                        } else {
+                            ((smoothed_period as u64 * 7 + clamped as u64) / 8) as u32
+                        };
+                        scope.set_period_samples(smoothed_period);
+                    } else {
+                        stale_loops = stale_loops.saturating_add(1);
+                        if stale_loops >= STALE_THRESHOLD {
+                            scope.set_timebase(Timebase::Timebase100ms);
+                            smoothed_period = 0;
+                        }
+                    }
+                }
+                other => scope.set_timebase(other),
+            }
             let (sppd_x, sppd) = scope.pixels_per_div();
             let n_ch = opts.scope1.n_channels.value;
             let ypos = [opts.scope1.ypos0.value, opts.scope1.ypos1.value,
