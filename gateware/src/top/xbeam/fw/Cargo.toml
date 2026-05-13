@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tiliqua-hal = { path="../../../rs/hal", default-features = false }
-tiliqua-lib = { path = "../../../rs/lib" }
+tiliqua-lib = { path = "../../../rs/lib", features = ["auto_timebase"] }
 opts = { path = "../../../rs/opts" }
 tiliqua-pac = { path="../pac", default-features = false, features = ["critical-section", "vexriscv"] }
 

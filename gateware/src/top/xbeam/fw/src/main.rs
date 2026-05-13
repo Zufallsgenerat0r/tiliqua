@@ -225,6 +225,7 @@ fn main() -> ! {
     let mut last_trigger_count: u32 = 0;
     let mut stale_loops: u32 = 0;
     let mut smoothed_period: u32 = 0;
+    let mut prev_was_auto: bool = false;
     const STALE_THRESHOLD: u32 = 50;
 
     irq::scope(|s| {
@@ -333,6 +334,16 @@ fn main() -> ! {
             scope.set_xscale(xscale_bits);
             match opts.scope2.timebase.value {
                 Timebase::Auto => {
+                    if !prev_was_auto {
+                        // Entering Auto from manual: drop any stale EMA state
+                        // and snap the trigger-count baseline so the first
+                        // post-entry frame isn't flagged as a spurious "fresh"
+                        // measurement against pre-detour data.
+                        smoothed_period = 0;
+                        last_trigger_count = scope.trigger_count();
+                        stale_loops = 0;
+                        prev_was_auto = true;
+                    }
                     let tc = scope.trigger_count();
                     let raw_period = scope.measured_period_samples();
                     let fresh = tc != last_trigger_count;
@@ -354,7 +365,10 @@ fn main() -> ! {
                         }
                     }
                 }
-                other => scope.set_timebase(other),
+                other => {
+                    prev_was_auto = false;
+                    scope.set_timebase(other);
+                }
             }
             let (sppd_x, sppd) = scope.pixels_per_div();
             let n_ch = opts.scope1.n_channels.value;

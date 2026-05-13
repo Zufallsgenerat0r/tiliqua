@@ -4,8 +4,6 @@ use strum_macros::{EnumIter, IntoStaticStr};
 #[derive(Default, Clone, Copy, PartialEq, EnumIter, IntoStaticStr, Serialize, Deserialize)]
 #[strum(serialize_all = "kebab-case")]
 pub enum Timebase {
-    #[strum(serialize = "auto")]
-    Auto,
     #[strum(serialize = "500ms/d")]
     Timebase500ms,
     #[strum(serialize = "200ms/d")]
@@ -33,6 +31,11 @@ pub enum Timebase {
     Timebase100us,
     #[strum(serialize = "50us/d")]
     Timebase50us,
+    // Auto is feature-gated and appended at the end so its presence does not
+    // shift the postcard-encoded discriminants of persisted Timebase values.
+    #[cfg(feature = "auto_timebase")]
+    #[strum(serialize = "auto")]
+    Auto,
 }
 
 impl Timebase {
@@ -40,6 +43,7 @@ impl Timebase {
     /// (which is driven from a runtime period measurement, not a fixed value).
     pub fn t_div_us(&self) -> Option<u64> {
         match self {
+            #[cfg(feature = "auto_timebase")]
             Timebase::Auto          => None,
             Timebase::Timebase500ms => Some(500_000),
             Timebase::Timebase200ms => Some(200_000),

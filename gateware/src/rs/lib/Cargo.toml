@@ -7,6 +7,11 @@ edition = "2021"
 name = "tiliqua_lib"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Adds `Timebase::Auto`. Tops that enable this must implement an auto-timebase
+# loop driving the `timebase` register from a runtime period measurement.
+auto_timebase = []
 
 [dependencies]
 log = "0.4.17"
