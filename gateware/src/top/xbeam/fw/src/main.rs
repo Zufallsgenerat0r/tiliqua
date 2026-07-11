@@ -225,8 +225,17 @@ fn main() -> ! {
     let mut last_trigger_count: u32 = 0;
     let mut stale_loops: u32 = 0;
     let mut smoothed_period: u32 = 0;
+    let mut applied_period: u32 = 0;
+    let mut outlier_streak: u32 = 0;
     let mut prev_was_auto: bool = false;
     const STALE_THRESHOLD: u32 = 50;
+    // The hardware trigger has no hysteresis, so noise at the threshold
+    // crossing can fire twice per cycle and report a bogus tiny period.
+    // Reject measurements deviating >25% from the smoothed value unless
+    // they persist (a real frequency jump), and only rewrite the timebase
+    // when the smoothed period moves >1/128 (~0.8%) past the applied one
+    // so measurement jitter does not continuously rescale the display.
+    const OUTLIER_STREAK_ACCEPT: u32 = 3;
 
     irq::scope(|s| {
 
@@ -340,6 +349,8 @@ fn main() -> ! {
                         // post-entry frame isn't flagged as a spurious "fresh"
                         // measurement against pre-detour data.
                         smoothed_period = 0;
+                        applied_period = 0;
+                        outlier_streak = 0;
                         last_trigger_count = scope.trigger_count();
                         stale_loops = 0;
                         prev_was_auto = true;
@@ -354,17 +365,36 @@ fn main() -> ! {
                             raw_period,
                             scope.fs_up(),
                         );
-                        smoothed_period = if smoothed_period == 0 {
-                            clamped
+                        let outlier = smoothed_period != 0
+                            && clamped.abs_diff(smoothed_period) * 4 > smoothed_period;
+                        if outlier {
+                            outlier_streak += 1;
+                            if outlier_streak >= OUTLIER_STREAK_ACCEPT {
+                                // Persistent: real frequency jump. Snap to
+                                // re-lock fast instead of EMA-crawling there.
+                                smoothed_period = clamped;
+                                outlier_streak = 0;
+                            }
                         } else {
-                            ((smoothed_period as u64 * 7 + clamped as u64) / 8) as u32
-                        };
-                        scope.set_period_samples(smoothed_period);
+                            outlier_streak = 0;
+                            smoothed_period = if smoothed_period == 0 {
+                                clamped
+                            } else {
+                                ((smoothed_period as u64 * 7 + clamped as u64) / 8) as u32
+                            };
+                        }
+                        let moved = smoothed_period.abs_diff(applied_period);
+                        if smoothed_period != 0 && moved * 128 > applied_period {
+                            scope.set_period_samples(smoothed_period);
+                            applied_period = smoothed_period;
+                        }
                     } else {
                         stale_loops = stale_loops.saturating_add(1);
                         if stale_loops >= STALE_THRESHOLD {
                             scope.set_timebase(Timebase::Timebase100ms);
                             smoothed_period = 0;
+                            applied_period = 0;
+                            outlier_streak = 0;
                         }
                     }
                 }
