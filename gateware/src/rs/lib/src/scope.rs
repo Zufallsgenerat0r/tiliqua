@@ -124,10 +124,40 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "auto_timebase")]
+    const FS_UP: u32 = 1_536_000;
+
+    #[cfg(feature = "auto_timebase")]
     #[test]
     fn auto_timebase_preserves_one_hz_period_at_scope_sample_rate() {
-        let fs_up = 1_536_000;
+        assert_eq!(auto_timebase_period_samples(FS_UP, FS_UP), FS_UP);
+    }
 
-        assert_eq!(auto_timebase_period_samples(fs_up, fs_up), fs_up);
+    #[cfg(feature = "auto_timebase")]
+    #[test]
+    fn auto_timebase_clamps_short_periods_to_minimum() {
+        for raw in [0, 1, AUTO_TIMEBASE_MIN_PERIOD_SAMPLES - 1] {
+            assert_eq!(
+                auto_timebase_period_samples(raw, FS_UP),
+                AUTO_TIMEBASE_MIN_PERIOD_SAMPLES
+            );
+        }
+    }
+
+    #[cfg(feature = "auto_timebase")]
+    #[test]
+    fn auto_timebase_clamps_long_periods_to_full_screen_at_slowest_timebase() {
+        // Slowest manual timebase is 500ms/d * 10 divisions = 5s of screen.
+        let max = FS_UP * 5;
+        assert_eq!(auto_timebase_period_samples(max, FS_UP), max);
+        assert_eq!(auto_timebase_period_samples(max + 1, FS_UP), max);
+        assert_eq!(auto_timebase_period_samples(u32::MAX, FS_UP), max);
+    }
+
+    #[cfg(feature = "auto_timebase")]
+    #[test]
+    fn auto_timebase_passes_through_in_range_periods() {
+        // 440 Hz at the scope sample rate.
+        let period = FS_UP / 440;
+        assert_eq!(auto_timebase_period_samples(period, FS_UP), period);
     }
 }
