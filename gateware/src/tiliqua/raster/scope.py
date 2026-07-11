@@ -219,7 +219,9 @@ class ScopePeripheral(wiring.Component):
         m.submodules.irep2 = irep2 = dsp.Split(2, replicate=True, source=self.isplit4.o[0], shape=PSQ)
 
         # Send one copy to trigger => ramp => X
-        m.submodules.trig = trig = dsp.Trigger(shape=PSQ)
+        # ~50mV hysteresis: without it, noise near the threshold crossing
+        # double-fires the trigger, corrupting the period measurement.
+        m.submodules.trig = trig = dsp.Trigger(shape=PSQ, hysteresis=0.05/8.192)
         m.submodules.ramp = ramp = dsp.Ramp(shape=PSQ)
         timebase = Signal(shape=dsp.Ramp.TIMEBASE_SQ)
         # Audio => Trigger

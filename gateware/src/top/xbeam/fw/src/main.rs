@@ -227,6 +227,7 @@ fn main() -> ! {
     let mut smoothed_period: u32 = 0;
     let mut applied_period: u32 = 0;
     let mut outlier_streak: u32 = 0;
+    let mut last_outlier: u32 = 0;
     let mut prev_was_auto: bool = false;
     const STALE_THRESHOLD: u32 = 50;
     // The hardware trigger has no hysteresis, so noise at the threshold
@@ -368,10 +369,19 @@ fn main() -> ! {
                         let outlier = smoothed_period != 0
                             && clamped.abs_diff(smoothed_period) * 4 > smoothed_period;
                         if outlier {
-                            outlier_streak += 1;
+                            // Streak only counts outliers that agree with each
+                            // other (a real frequency jump is self-consistent;
+                            // trigger glitches are scattered).
+                            if clamped.abs_diff(last_outlier) * 4 <= last_outlier {
+                                outlier_streak += 1;
+                            } else {
+                                outlier_streak = 1;
+                            }
+                            last_outlier = clamped;
                             if outlier_streak >= OUTLIER_STREAK_ACCEPT {
-                                // Persistent: real frequency jump. Snap to
-                                // re-lock fast instead of EMA-crawling there.
+                                // Persistent and consistent: real frequency
+                                // jump. Snap to re-lock fast instead of
+                                // EMA-crawling there.
                                 smoothed_period = clamped;
                                 outlier_streak = 0;
                             }
