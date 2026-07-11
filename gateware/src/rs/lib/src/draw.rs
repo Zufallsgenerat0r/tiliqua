@@ -361,6 +361,41 @@ where
     Ok(())
 }
 
+/// Frequency + period readout for the scope's trigger channel,
+/// e.g. `440.0Hz 2.27ms`. `freq_millihz` of 0 draws nothing.
+pub fn draw_scope_freq<D>(d: &mut D, pos_x: u32, pos_y: u32, hue: u8, freq_millihz: u64) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = HI8>,
+{
+    if freq_millihz == 0 {
+        return Ok(());
+    }
+    let font_small_grey = MonoTextStyle::new(&FONT_9X15, HI8::new(hue, 10));
+
+    let mut s: String<32> = String::new();
+    let hz = freq_millihz / 1000;
+    if hz >= 1000 {
+        write!(s, "{}.{:02}kHz", hz / 1000, (hz % 1000) / 10).ok();
+    } else {
+        write!(s, "{}.{}Hz", hz, (freq_millihz % 1000) / 100).ok();
+    }
+    let period_us = 1_000_000_000 / freq_millihz;
+    if period_us >= 10_000 {
+        write!(s, " {}.{:02}ms", period_us / 1000, (period_us % 1000) / 10).ok();
+    } else {
+        write!(s, " {}us", period_us).ok();
+    }
+
+    Text::with_alignment(
+        &s,
+        Point::new(pos_x as i32, pos_y as i32),
+        font_small_grey,
+        Alignment::Center
+    ).draw(d)?;
+
+    Ok(())
+}
+
 pub fn draw_help<D>(d: &mut D, x: u32, y: u32, scroll: u8, help_text: &str, hue: u8) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = HI8>,

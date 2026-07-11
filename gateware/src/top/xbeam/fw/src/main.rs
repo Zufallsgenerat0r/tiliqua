@@ -426,6 +426,17 @@ fn main() -> ! {
                 scope.set_ypos_px(ch.into(), pos);
             }
 
+            // Live frequency/period readout of the trigger channel while
+            // auto-timebase is locked (smoothed_period holds a fresh value).
+            if opts.misc.plot_type.value == PlotType::Scope
+                && opts.scope2.timebase.value == Timebase::Auto
+                && smoothed_period != 0
+            {
+                let freq_millihz = (scope.fs_up() as u64) * 1000 / (smoothed_period as u64);
+                draw::draw_scope_freq(&mut display, h_active / 2, v_active - 70,
+                                      opts.beam.ui_hue.value, freq_millihz).ok();
+            }
+
             // Only connect USB PHY if the TUSB322 Type-C controller says we are attached.
             // This fixes enumeration issues on some machines when using typec <-> typec cables.
             critical_section::with(|_| {
