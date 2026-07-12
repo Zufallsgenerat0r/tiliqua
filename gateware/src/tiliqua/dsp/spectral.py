@@ -89,6 +89,7 @@ class BlockLPF(wiring.Component):
 
         idx = Signal(range(self.sz+1))
         l_in = Signal(self.i_shape)
+        l_mem = Signal(self.i_shape)
         m.d.comb += [
             mem_rd.en.eq(1),
             mem_rd.addr.eq(idx),
@@ -114,10 +115,17 @@ class BlockLPF(wiring.Component):
                     m.next = "READ"
 
             with m.State("READ"):
+                m.next = "LATCH"
+
+            with m.State("LATCH"):
+                # Register the memory read before the multiply; BRAM clk-to-q
+                # into the shared MAC's operand mux does not close timing in
+                # congested designs.
+                m.d.sync += l_mem.eq(mem_rd.data)
                 m.next = "MAC1"
 
             with m.State("MAC1"):
-                with mp.Multiply(m, a=mem_rd.data, b=self.beta):
+                with mp.Multiply(m, a=l_mem, b=self.beta):
                     m.d.sync += acc.eq(mp.result.z)
                     m.next = "MAC2"
 
@@ -157,6 +165,9 @@ class SpectralEnvelope(wiring.Component):
 
     Members
     -------
+    beta : :py:`In(self.shape)`
+        Runtime-adjustable smoothing constant, forwarded to the internal
+        :class:`BlockLPF`.
     i : :py:`In(stream.Signature(Block(CQ(self.shape))))`
         Incoming stream of blocks of complex spectra.
     o : :py:`Out(stream.Signature(Block(self.shape)))`
@@ -165,16 +176,20 @@ class SpectralEnvelope(wiring.Component):
 
     def __init__(self,
                  shape: fixed.Shape,
-                 sz: int):
+                 sz: int,
+                 beta: float = 0.75):
         """
         shape : Shape
             Shape of fixed-point number to use for streams.
         sz : int
             The size of each input block and outgoing spectral envelope blocks.
+        beta : float
+            Initial low-pass 1-pole smoothing constant.
         """
         self.shape = shape
         self.sz    = sz
         super().__init__({
+            "beta": In(self.shape, init=fixed.Const(beta, shape=self.shape)),
             "i": In(stream.Signature(Block(CQ(self.shape)))),
             "o": Out(stream.Signature(Block(self.shape))),
         })
@@ -185,6 +200,7 @@ class SpectralEnvelope(wiring.Component):
                 self.shape, magnitude_correction=False))
         m.submodules.block_lpf = block_lpf = BlockLPF(
                 self.shape, self.sz)
+        m.d.comb += block_lpf.beta.eq(self.beta)
         wiring.connect(m, wiring.flipped(self.i), rect_to_polar.i)
         connect_magnitude_to_sq(m, rect_to_polar.o, block_lpf.i)
         wiring.connect(m, block_lpf.o, wiring.flipped(self.o))
