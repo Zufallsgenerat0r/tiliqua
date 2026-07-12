@@ -450,7 +450,12 @@ class Spectrogram(wiring.Component):
         fftsz = self.sz
 
         # Resample input down, so visible area is a fraction of the nyquist (e.g. 192khz/8 = 24kHz visual bandwidth)
-        m.submodules.resample = resample = dsp.Resample(fs_in=self.fs, n_up=1, m_down=8 if self.fs > 48000 else 2)
+        # order_mult is bumped so the anti-alias transition band is narrow enough
+        # that content above the decimated nyquist doesn't visibly fold back into
+        # the displayed spectrum (the default's transition band is wider than the
+        # whole visible range).
+        m.submodules.resample = resample = dsp.Resample(
+            fs_in=self.fs, n_up=1, m_down=8 if self.fs > 48000 else 2, order_mult=32)
         m.submodules.analyzer = analyzer = dsp.fft.STFTAnalyzer(shape=ASQ, sz=fftsz)
         m.submodules.envelope = envelope = dsp.spectral.SpectralEnvelope(shape=ASQ, sz=fftsz)
         def log_lut(x):
