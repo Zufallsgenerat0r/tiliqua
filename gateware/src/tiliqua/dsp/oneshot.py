@@ -17,10 +17,16 @@ class Trigger(wiring.Component):
     When trigger condition is met, output is set to 1, for 1 stream cycle.
 
     Currently this only implements rising edge trigger.
+
+    With nonzero `hysteresis`, after firing, the trigger is re-armed only
+    once the sample falls below ``threshold - hysteresis``. This suppresses
+    repeated firing caused by noise near the threshold crossing. With
+    ``hysteresis=0.0``, behaviour matches a plain rising-edge comparison.
     """
 
-    def __init__(self, shape=ASQ):
+    def __init__(self, shape=ASQ, hysteresis=0.0):
         self.shape = shape
+        self.hysteresis = hysteresis
         super().__init__({
             "i": In(stream.Signature(data.StructLayout({
                 "sample":    shape,
@@ -32,8 +38,10 @@ class Trigger(wiring.Component):
     def elaborate(self, platform):
         m = Module()
 
-        trigger = Signal()
-        l_sample = Signal(shape=self.shape)
+        armed = Signal()
+        arm_lvl = Signal(shape=self.shape)
+        m.d.comb += arm_lvl.eq(
+            self.i.payload.threshold - fixed.Const(self.hysteresis, shape=self.shape))
 
         m.d.comb += [
             self.o.valid.eq(self.i.valid),
@@ -41,13 +49,12 @@ class Trigger(wiring.Component):
         ]
 
         with m.If(self.i.valid & self.o.ready):
-            m.d.sync += l_sample.eq(self.i.payload.sample)
-            m.d.comb += [
-                self.o.payload.eq(
-                    (l_sample              < self.i.payload.threshold) &
-                    (self.i.payload.sample >= self.i.payload.threshold)
-                ),
-            ]
+            fire = armed & (self.i.payload.sample >= self.i.payload.threshold)
+            m.d.comb += self.o.payload.eq(fire)
+            with m.If(fire):
+                m.d.sync += armed.eq(0)
+            with m.Elif(self.i.payload.sample < arm_lvl):
+                m.d.sync += armed.eq(1)
 
         return m
 

@@ -219,6 +219,25 @@ fn main() -> ! {
 
     let mut delay_smoothers = [OnePoleSmoother::new(0.05f32); 4];
 
+    // Auto-timebase state. Owned here (not persisted): recomputed each loop.
+    // Integer EMA is used instead of OnePoleSmoother because period samples
+    // at fs_up can exceed 32768, which overflows the 16-bit-integer Fix type.
+    let mut last_trigger_count: u32 = 0;
+    let mut stale_loops: u32 = 0;
+    let mut smoothed_period: u32 = 0;
+    let mut applied_period: u32 = 0;
+    let mut outlier_streak: u32 = 0;
+    let mut last_outlier: u32 = 0;
+    let mut prev_was_auto: bool = false;
+    const STALE_THRESHOLD: u32 = 50;
+    // The hardware trigger has no hysteresis, so noise at the threshold
+    // crossing can fire twice per cycle and report a bogus tiny period.
+    // Reject measurements deviating >25% from the smoothed value unless
+    // they persist (a real frequency jump), and only rewrite the timebase
+    // when the smoothed period moves >1/128 (~0.8%) past the applied one
+    // so measurement jitter does not continuously rescale the display.
+    const OUTLIER_STREAK_ACCEPT: u32 = 3;
+
     irq::scope(|s| {
 
         s.register(handlers::Interrupt::TIMER0, timer0);
@@ -323,7 +342,77 @@ fn main() -> ! {
                 XZoom::Double => 5,
             };
             scope.set_xscale(xscale_bits);
-            scope.set_timebase(opts.scope2.timebase.value);
+            match opts.scope2.timebase.value {
+                Timebase::Auto => {
+                    if !prev_was_auto {
+                        // Entering Auto from manual: drop any stale EMA state
+                        // and snap the trigger-count baseline so the first
+                        // post-entry frame isn't flagged as a spurious "fresh"
+                        // measurement against pre-detour data.
+                        smoothed_period = 0;
+                        applied_period = 0;
+                        outlier_streak = 0;
+                        last_trigger_count = scope.trigger_count();
+                        stale_loops = 0;
+                        prev_was_auto = true;
+                    }
+                    let tc = scope.trigger_count();
+                    let raw_period = scope.measured_period_samples();
+                    let fresh = tc != last_trigger_count;
+                    last_trigger_count = tc;
+                    if fresh {
+                        stale_loops = 0;
+                        let clamped = tiliqua_lib::scope::auto_timebase_period_samples(
+                            raw_period,
+                            scope.fs_up(),
+                        );
+                        let outlier = smoothed_period != 0
+                            && clamped.abs_diff(smoothed_period) * 4 > smoothed_period;
+                        if outlier {
+                            // Streak only counts outliers that agree with each
+                            // other (a real frequency jump is self-consistent;
+                            // trigger glitches are scattered).
+                            if clamped.abs_diff(last_outlier) * 4 <= last_outlier {
+                                outlier_streak += 1;
+                            } else {
+                                outlier_streak = 1;
+                            }
+                            last_outlier = clamped;
+                            if outlier_streak >= OUTLIER_STREAK_ACCEPT {
+                                // Persistent and consistent: real frequency
+                                // jump. Snap to re-lock fast instead of
+                                // EMA-crawling there.
+                                smoothed_period = clamped;
+                                outlier_streak = 0;
+                            }
+                        } else {
+                            outlier_streak = 0;
+                            smoothed_period = if smoothed_period == 0 {
+                                clamped
+                            } else {
+                                ((smoothed_period as u64 * 7 + clamped as u64) / 8) as u32
+                            };
+                        }
+                        let moved = smoothed_period.abs_diff(applied_period);
+                        if smoothed_period != 0 && moved * 128 > applied_period {
+                            scope.set_period_samples(smoothed_period);
+                            applied_period = smoothed_period;
+                        }
+                    } else {
+                        stale_loops = stale_loops.saturating_add(1);
+                        if stale_loops >= STALE_THRESHOLD {
+                            scope.set_timebase(Timebase::Timebase100ms);
+                            smoothed_period = 0;
+                            applied_period = 0;
+                            outlier_streak = 0;
+                        }
+                    }
+                }
+                other => {
+                    prev_was_auto = false;
+                    scope.set_timebase(other);
+                }
+            }
             let (sppd_x, sppd) = scope.pixels_per_div();
             let n_ch = opts.scope1.n_channels.value;
             let ypos = [opts.scope1.ypos0.value, opts.scope1.ypos1.value,
@@ -335,6 +424,17 @@ fn main() -> ! {
                     750 // hide inactive channels off-screen
                 };
                 scope.set_ypos_px(ch.into(), pos);
+            }
+
+            // Live frequency/period readout of the trigger channel while
+            // auto-timebase is locked (smoothed_period holds a fresh value).
+            if opts.misc.plot_type.value == PlotType::Scope
+                && opts.scope2.timebase.value == Timebase::Auto
+                && smoothed_period != 0
+            {
+                let freq_millihz = (scope.fs_up() as u64) * 1000 / (smoothed_period as u64);
+                draw::draw_scope_freq(&mut display, h_active / 2, v_active - 70,
+                                      opts.beam.ui_hue.value, freq_millihz).ok();
             }
 
             // Only connect USB PHY if the TUSB322 Type-C controller says we are attached.

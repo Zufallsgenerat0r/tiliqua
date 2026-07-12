@@ -149,6 +149,12 @@ class ScopePeripheral(wiring.Component):
     class Fs(csr.Register, access="r"):
         fs: csr.Field(csr.action.R, unsigned(32))
 
+    class PeriodSamples(csr.Register, access="r"):
+        period_samples: csr.Field(csr.action.R, unsigned(32))
+
+    class TriggerCount(csr.Register, access="r"):
+        trigger_count: csr.Field(csr.action.R, unsigned(32))
+
     def __init__(self, n_channels=4, fs=48000):
 
         self.fs = fs
@@ -169,6 +175,8 @@ class ScopePeripheral(wiring.Component):
                                 offset=(0x20+i*4)) for i in range(self.n_channels)]
         self._pixels_per_volt = regs.add("pixels_per_volt", self.PixelsPerVolt(), offset=0x30)
         self._fs              = regs.add("fs",              self.Fs(),             offset=0x34)
+        self._period_samples  = regs.add("period_samples",  self.PeriodSamples(),  offset=0x38)
+        self._trigger_count   = regs.add("trigger_count",   self.TriggerCount(),   offset=0x3C)
 
         self._bridge = csr.Bridge(regs.as_memory_map())
         super().__init__({
@@ -211,7 +219,9 @@ class ScopePeripheral(wiring.Component):
         m.submodules.irep2 = irep2 = dsp.Split(2, replicate=True, source=self.isplit4.o[0], shape=PSQ)
 
         # Send one copy to trigger => ramp => X
-        m.submodules.trig = trig = dsp.Trigger(shape=PSQ)
+        # ~50mV hysteresis: without it, noise near the threshold crossing
+        # double-fires the trigger, corrupting the period measurement.
+        m.submodules.trig = trig = dsp.Trigger(shape=PSQ, hysteresis=0.05/8.192)
         m.submodules.ramp = ramp = dsp.Ramp(shape=PSQ)
         timebase = Signal(shape=dsp.Ramp.TIMEBASE_SQ)
         # Audio => Trigger
@@ -224,6 +234,26 @@ class ScopePeripheral(wiring.Component):
             i.payload.trigger.eq(o.payload | trigger_always),
             i.payload.td.eq(timebase),
         ])
+
+        # Period measurement for auto-timebase. Tap the raw trigger output:
+        # we want the true input period regardless of the Ramp's debounce
+        # (which ignores retriggers mid-sweep until output > 0.985).
+        sample_ctr     = Signal(32)
+        period_samples = Signal(32)
+        trigger_count  = Signal(32)
+        with m.If(trig.o.valid & trig.o.ready):
+            with m.If(trig.o.payload):
+                m.d.sync += [
+                    period_samples.eq(sample_ctr),
+                    sample_ctr.eq(1),
+                    trigger_count.eq(trigger_count + 1),
+                ]
+            with m.Else():
+                m.d.sync += sample_ctr.eq(sample_ctr + 1)
+        m.d.comb += [
+            self._period_samples.f.period_samples.r_data.eq(period_samples),
+            self._trigger_count.f.trigger_count.r_data.eq(trigger_count),
+        ]
 
         # Split ramp into 4 streams, one for each channel
         m.submodules.rampsplit4 = rampsplit4 = dsp.Split(self.n_channels, replicate=True, source=ramp.o, shape=PSQ)
