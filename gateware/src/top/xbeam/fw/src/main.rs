@@ -84,6 +84,13 @@ fn build_cc_mapper(opts: &Opts) -> MidiCcMapper {
     m.add(74, global_index(opts, &opts.scope2.trig_lvl),  CcMapMode::Absolute);
     m.add(75, global_index(opts, &opts.scope2.intensity), CcMapMode::Absolute);
     m.add(76, global_index(opts, &opts.scope2.hue),       CcMapMode::Absolute);
+    // Spectrum page (CC 80-85)
+    m.add(80, global_index(opts, &opts.spectrum.freq_scale), CcMapMode::Absolute);
+    m.add(81, global_index(opts, &opts.spectrum.smooth),     CcMapMode::Absolute);
+    m.add(82, global_index(opts, &opts.spectrum.gain),       CcMapMode::Absolute);
+    m.add(83, global_index(opts, &opts.spectrum.ypos),       CcMapMode::Absolute);
+    m.add(84, global_index(opts, &opts.spectrum.intensity),  CcMapMode::Absolute);
+    m.add(85, global_index(opts, &opts.spectrum.hue),        CcMapMode::Absolute);
     m
 }
 
@@ -144,6 +151,7 @@ fn timer0_handler(app: &Mutex<RefCell<App>>) {
             Page::Vector => PlotType::Vector,
             Page::Scope1 => PlotType::Scope,
             Page::Scope2 => PlotType::Scope,
+            Page::Spectrum => PlotType::Spectrum,
             _ => app.ui.opts.misc.plot_type.value
         };
     });
@@ -247,6 +255,7 @@ fn main() -> ! {
 
         let mut vscope = Vector0::new(peripherals.VECTOR_PERIPH);
         let mut scope = Scope0::new(peripherals.SCOPE_PERIPH, 6);
+        let mut spectrum = Spectrum0::new(peripherals.SPECTRUM_PERIPH);
         let xbeam_mux = peripherals.XBEAM_PERIPH;
         let overlay_periph = peripherals.OVERLAY_PERIPH;
         let mut first = true;
@@ -323,14 +332,30 @@ fn main() -> ! {
             }
 
             let (ppd_x, ppd_y) = vscope.pixels_per_div();
-            vscope.set_xoffset_px(opts.vector.x_offset.value * (ppd_x / 4) as i16);
-            vscope.set_yoffset_px(opts.vector.y_offset.value * (ppd_y / 4) as i16);
-            vscope.set_xscale(opts.vector.x_scale.value);
-            vscope.set_yscale(opts.vector.y_scale.value);
-            vscope.set_pscale(opts.vector.i_scale.value);
-            vscope.set_intensity(opts.vector.i_offset.value);
-            vscope.set_cscale(opts.vector.c_scale.value);
-            vscope.set_hue(opts.vector.c_offset.value);
+            if opts.misc.plot_type.value == PlotType::Spectrum {
+                // Spectrum mode borrows the vectorscope stroke: x is the
+                // frequency axis (fixed scale, spans the display center),
+                // y is magnitude, pen-lift rides the intensity channel
+                // (pscale must stay live for it to work).
+                vscope.set_xoffset_px(0);
+                vscope.set_yoffset_px(opts.spectrum.ypos.value * (ppd_y / 4) as i16);
+                vscope.set_xscale(VScale::Scale1V);
+                vscope.set_yscale(opts.spectrum.gain.value);
+                vscope.set_pscale(5);
+                vscope.set_intensity(opts.spectrum.intensity.value);
+                vscope.set_cscale(0);
+                vscope.set_hue(opts.spectrum.hue.value);
+            } else {
+                vscope.set_xoffset_px(opts.vector.x_offset.value * (ppd_x / 4) as i16);
+                vscope.set_yoffset_px(opts.vector.y_offset.value * (ppd_y / 4) as i16);
+                vscope.set_xscale(opts.vector.x_scale.value);
+                vscope.set_yscale(opts.vector.y_scale.value);
+                vscope.set_pscale(opts.vector.i_scale.value);
+                vscope.set_intensity(opts.vector.i_offset.value);
+                vscope.set_cscale(opts.vector.c_scale.value);
+                vscope.set_hue(opts.vector.c_offset.value);
+            }
+            spectrum.set_smooth(opts.spectrum.smooth.value);
 
             scope.set_hue(opts.scope2.hue.value);
             scope.set_intensity(opts.scope2.intensity.value);
@@ -504,16 +529,29 @@ fn main() -> ! {
             display.rotate(&opts.misc.rotation.value);
 
 
+            let freq_log = opts.spectrum.freq_scale.value == FreqScale::Log;
             if opts.tracker.page.value == Page::Help {
                 scope.set_enabled(false, false);
                 vscope.set_enabled(false);
+                spectrum.set_enabled(false, freq_log);
             } else {
-                if opts.misc.plot_type.value == PlotType::Vector {
-                    scope.set_enabled(false, false);
-                    vscope.set_enabled(true);
-                } else {
-                    scope.set_enabled(true, opts.scope2.trig_mode.value == TriggerMode::Always);
-                    vscope.set_enabled(false);
+                match opts.misc.plot_type.value {
+                    PlotType::Vector => {
+                        scope.set_enabled(false, false);
+                        spectrum.set_enabled(false, freq_log);
+                        vscope.set_enabled(true);
+                    }
+                    PlotType::Scope => {
+                        scope.set_enabled(true, opts.scope2.trig_mode.value == TriggerMode::Always);
+                        spectrum.set_enabled(false, freq_log);
+                        vscope.set_enabled(false);
+                    }
+                    PlotType::Spectrum => {
+                        // Spectrum renders through the vectorscope stroke.
+                        scope.set_enabled(false, false);
+                        spectrum.set_enabled(true, freq_log);
+                        vscope.set_enabled(true);
+                    }
                 }
             }
 

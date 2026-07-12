@@ -14,5 +14,9 @@ hal::impl_vector! {
     Vector0: pac::VECTOR_PERIPH,
 }
 
+hal::impl_spectrum! {
+    Spectrum0: pac::SPECTRUM_PERIPH,
+}
+
 pub mod handlers;
 pub mod options;

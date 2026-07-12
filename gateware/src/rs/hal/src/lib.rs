@@ -24,6 +24,7 @@ pub mod cy8cmbr3xxx;
 pub mod spiflash;
 pub mod eeprom;
 pub mod scope;
+pub mod spectrum;
 pub mod vector;
 
 pub use embedded_hal as hal;
