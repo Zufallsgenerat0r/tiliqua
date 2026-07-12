@@ -8,7 +8,7 @@ Multi-channel oscilloscope and vectorscope SoC peripherals.
 import math
 
 from amaranth import *
-from amaranth.lib import data, stream, wiring
+from amaranth.lib import data, memory, stream, wiring
 from amaranth.lib.wiring import In, Out
 from amaranth.utils import exact_log2
 from amaranth_soc import csr
@@ -322,37 +322,132 @@ class ScopePeripheral(wiring.Component):
         return m
 
 
+class FrequencyAxis(wiring.Component):
+
+    """
+    Format blocks of (log-)magnitude spectra for plotting.
+
+    For each incoming bin, emit the magnitude on channel 0 (offset to
+    center), an axis position for that bin on channel 1, and a pen-lift
+    on channel 2 (to avoid interpolation artifacts).
+
+    Axis positions come from a ROM holding a linear and a logarithmic
+    table, selected at runtime with ``log_scale``. Only the first
+    ``sz//2`` bins (positive frequencies) are drawn; the mirrored half
+    is emitted with the pen lifted, parked at the last visible position.
+    On the log axis, bin 0 (DC) is parked at bin 1's position with the
+    pen lifted.
+    """
+
+    def __init__(self, sz):
+        self.sz = sz
+        super().__init__({
+            # Blocks of real (log-)magnitude bins
+            "i": In(stream.Signature(dsp.block.Block(ASQ))),
+            # Out on channels 0 (magnitude), 1 (axis), 2 (pen-lift)
+            "o": Out(stream.Signature(data.ArrayLayout(ASQ, 4))),
+            "log_scale": In(unsigned(1)),
+        })
+
+    def elaborate(self, platform):
+        m = Module()
+
+        sz = self.sz
+        n_vis = sz // 2
+        n_oct = math.log2(n_vis)
+
+        def axis_position(k, log):
+            if k >= n_vis:
+                # Mirrored half: parked at the last visible position.
+                k = n_vis - 1
+            if log:
+                x = math.log2(max(k, 1))/n_oct - 0.5
+            else:
+                x = k/n_vis - 0.5
+            return fixed.Const(x, shape=ASQ, clamp=True)
+
+        m.submodules.rom = rom = memory.Memory(
+            shape=ASQ, depth=2*sz,
+            init=[axis_position(k, False) for k in range(sz)] +
+                 [axis_position(k, True)  for k in range(sz)])
+        rom_rd = rom.read_port()
+
+        idx = Signal(range(sz))
+        l_mag = Signal(ASQ)
+        m.d.comb += [
+            rom_rd.en.eq(1),
+            rom_rd.addr.eq(Cat(idx, self.log_scale)),
+        ]
+
+        pen_lift = Signal()
+        m.d.comb += pen_lift.eq(
+            (idx >= n_vis) | (self.log_scale & (idx == 0)))
+
+        m.d.comb += [
+            # Magnitude on ch0 (offset to center)
+            self.o.payload[0].eq(l_mag - fixed.Const(0.25)),
+            # Axis position on ch1
+            self.o.payload[1].eq(rom_rd.data),
+        ]
+        with m.If(pen_lift):
+            m.d.comb += self.o.payload[2].eq(ASQ.max())
+
+        with m.FSM():
+            with m.State("IDLE"):
+                m.d.comb += self.i.ready.eq(1)
+                with m.If(self.i.valid):
+                    m.d.sync += l_mag.eq(self.i.payload.sample)
+                    with m.If(self.i.payload.first):
+                        m.d.sync += idx.eq(0)
+                    with m.Else():
+                        m.d.sync += idx.eq(idx+1)
+                    m.next = "READ"
+            with m.State("READ"):
+                # 1 cycle for the sync ROM read of the new `idx`.
+                m.next = "OUTPUT"
+            with m.State("OUTPUT"):
+                m.d.comb += self.o.valid.eq(1)
+                with m.If(self.o.ready):
+                    m.next = "IDLE"
+
+        return m
+
+
 class Spectrogram(wiring.Component):
 
     """
     Simple spectrogram drawing logic.
 
     Take input channel 0, run an FFT/STFT on it, take the logarithm and
-    emit the log-magnitude on X (0), frequency index on Y (1), and a
-    pen-lift on 2 (to avoid interpolation artifacts).
+    emit the log-magnitude on 0, frequency axis position on 1, and a
+    pen-lift on 2 (see :class:`FrequencyAxis`).
 
     Designed to connect to Stroke - that is, use a vectorscope as
     a spectrum analyzer visualization.
     """
 
-    def __init__(self, fs):
+    def __init__(self, fs, sz=512):
         self.fs = fs
+        self.sz = sz
         super().__init__({
             # In on channel 0
             "i": In(stream.Signature(data.ArrayLayout(ASQ, 4))),
-            # Out on channels 0 (y), 1 (x), 2 (intensity)
+            # Out on channels 0 (magnitude), 1 (axis), 2 (pen-lift)
             "o": Out(stream.Signature(data.ArrayLayout(ASQ, 4))),
+            # Select logarithmic frequency axis (0 = linear)
+            "freq_scale_log": In(unsigned(1)),
+            # Envelope smoothing level, indexes a table of one-pole
+            # smoothing constants (0 = no smoothing).
+            "smooth": In(unsigned(4), init=4),
         })
 
     def elaborate(self, platform):
         m = Module()
 
         m.submodules.split4 = split4 = dsp.Split(4)
-        m.submodules.merge4 = merge4 = dsp.Merge(4)
         wiring.connect(m, wiring.flipped(self.i), split4.i)
-        wiring.connect(m, merge4.o, wiring.flipped(self.o))
 
-        fftsz=512
+        fftsz = self.sz
 
         # Resample input down, so visible area is a fraction of the nyquist (e.g. 192khz/8 = 24kHz visual bandwidth)
         m.submodules.resample = resample = dsp.Resample(fs_in=self.fs, n_up=1, m_down=8 if self.fs > 48000 else 2)
@@ -366,42 +461,112 @@ class Spectrogram(wiring.Component):
             return r
         m.submodules.log = log = dsp.block.WrapCore(dsp.WaveShaper(
                 lut_function=log_lut, lut_size=512, continuous=False))
+        m.submodules.faxis = faxis = FrequencyAxis(sz=fftsz)
+
+        # `smooth` level to one-pole smoothing constant; level->beta mapping
+        # lives here so SoC register values are independent of the ASQ format.
+        with m.Switch(self.smooth):
+            for n in range(16):
+                with m.Case(n):
+                    m.d.comb += envelope.beta.eq(
+                        fixed.Const(1.0 - 2.0**(-n/2.0), shape=ASQ, clamp=True))
+        m.d.comb += faxis.log_scale.eq(self.freq_scale_log)
 
         wiring.connect(m, split4.o[0], resample.i)
         wiring.connect(m, resample.o, analyzer.i)
         wiring.connect(m, analyzer.o, envelope.i)
         wiring.connect(m, envelope.o, log.i)
-
-        # Increasing X axis counter for frequency bins
-        f_axis = Signal(ASQ)
-        with m.If(log.o.valid & log.o.ready):
-            with m.If(log.o.payload.first):
-                m.d.sync += f_axis.eq(fixed.Const(-0.5))
-            with m.Else():
-                m.d.sync += f_axis.eq(f_axis+(fixed.Const(1)>>exact_log2(fftsz)))
-
-        # Pen lift when we get to the mirrored half of the spectrum.
-        with m.If(f_axis < fixed.Const(0)):
-            m.d.comb += merge4.i[2].payload.eq(ASQ.max())
-        with m.Else():
-            m.d.comb += merge4.i[2].payload.eq(0)
-
-        m.d.comb += [
-            # Connect log magnitude to ch0 output (offset to center)
-            merge4.i[0].payload.eq(log.o.payload.sample - fixed.Const(0.25)),
-            merge4.i[0].valid.eq(log.o.valid),
-            log.o.ready.eq(merge4.i[0].ready),
-
-            # Connect frequency bin / index to ch1 output (offset to center)
-            merge4.i[1].valid.eq(1),
-            merge4.i[1].payload.eq((f_axis<<1) - fixed.Const(0.5)),
-
-            # Pen lift always valid
-            merge4.i[2].valid.eq(1),
-        ]
+        wiring.connect(m, log.o, faxis.i)
+        wiring.connect(m, faxis.o, wiring.flipped(self.o))
 
         # Unused channels
         split4.wire_ready(m, [1, 2, 3])
-        merge4.wire_valid(m, [3])
+
+        return m
+
+
+class SpectrumPeripheral(wiring.Component):
+
+    """
+    :class:`Spectrogram` with CSR registers, for spectrum analysis in
+    SoC designs.
+
+    Emits axis position on channel 0 (x) and magnitude on channel 1 (y),
+    so the frequency axis is horizontal when plotted by a :class:`Stroke`
+    (whose tweakables - scale, offset, intensity, hue - are expected to
+    be provided by the peripheral this stream is routed to, normally a
+    :class:`VectorPeripheral`).
+    """
+
+    class Flags(csr.Register, access="w"):
+        enable:   csr.Field(csr.action.W, unsigned(1))
+        freq_log: csr.Field(csr.action.W, unsigned(1))
+
+    class SmoothReg(csr.Register, access="w"):
+        smooth: csr.Field(csr.action.W, unsigned(4))
+
+    class NBins(csr.Register, access="r"):
+        n_bins: csr.Field(csr.action.R, unsigned(16))
+
+    class FsBins(csr.Register, access="r"):
+        fs_bins: csr.Field(csr.action.R, unsigned(32))
+
+    def __init__(self, fs, sz=512):
+        self.fs = fs
+        self.sz = sz
+        self.spectrogram = Spectrogram(fs=fs, sz=sz)
+
+        regs = csr.Builder(addr_width=5, data_width=8)
+
+        self._flags   = regs.add("flags",   self.Flags(),     offset=0x0)
+        self._smooth  = regs.add("smooth",  self.SmoothReg(), offset=0x4)
+        self._n_bins  = regs.add("n_bins",  self.NBins(),     offset=0x8)
+        self._fs_bins = regs.add("fs_bins", self.FsBins(),    offset=0xC)
+
+        self._bridge = csr.Bridge(regs.as_memory_map())
+
+        super().__init__({
+            # In on channel 0
+            "i": In(stream.Signature(data.ArrayLayout(PSQ, 4))),
+            # CSR bus
+            "bus": In(csr.Signature(addr_width=regs.addr_width, data_width=regs.data_width)),
+            # Out on channels 0 (axis), 1 (magnitude), 2 (pen-lift)
+            "o": Out(stream.Signature(data.ArrayLayout(PSQ, 4))),
+            "soc_en": Out(unsigned(1), init=0),
+        })
+        self.bus.memory_map = self._bridge.bus.memory_map
+
+    def elaborate(self, platform):
+        m = Module()
+        m.submodules.bridge = self._bridge
+        m.submodules.spectrogram = spectrogram = self.spectrogram
+
+        wiring.connect(m, wiring.flipped(self.bus), self._bridge.bus)
+
+        # Decimated rate seen by the analyzer (matches Spectrogram internals).
+        m_down = 8 if self.fs > 48000 else 2
+        m.d.comb += [
+            self._n_bins.f.n_bins.r_data.eq(self.sz),
+            self._fs_bins.f.fs_bins.r_data.eq(int(self.fs // m_down)),
+        ]
+
+        with m.If(self._flags.f.enable.w_stb):
+            m.d.sync += self.soc_en.eq(self._flags.f.enable.w_data)
+
+        with m.If(self._flags.f.freq_log.w_stb):
+            m.d.sync += spectrogram.freq_scale_log.eq(self._flags.f.freq_log.w_data)
+
+        with m.If(self._smooth.f.smooth.w_stb):
+            m.d.sync += spectrogram.smooth.eq(self._smooth.f.smooth.w_data)
+
+        dsp.connect_remap(m, self.i, spectrogram.i, lambda o, i: [
+            i.payload[n].eq(o.payload[n]) for n in range(4)])
+        # Swap channels 0/1 so the frequency axis lands on x.
+        dsp.connect_remap(m, spectrogram.o, self.o, lambda o, i: [
+            i.payload[0].eq(o.payload[1]),
+            i.payload[1].eq(o.payload[0]),
+            i.payload[2].eq(o.payload[2]),
+            i.payload[3].eq(o.payload[3]),
+        ])
 
         return m
