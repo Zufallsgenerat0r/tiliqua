@@ -118,6 +118,9 @@ def top_level_cli(
                         help=(f"Tiliqua hardware revision (default={TiliquaRevision.default()})"))
     parser.add_argument('--bootaddr', type=str, default="0x0",
                         help="'bootaddr' argument of ecppack (default: 0x0).")
+    parser.add_argument('--nextpnr-seed', type=int, default=None,
+                        help="nextpnr: placement seed. Useful for designs that "
+                             "only meet timing on some placements.")
     parser.add_argument('--verbose', action='store_true',
                         help="amaranth: enable verbose synthesis")
     parser.add_argument('--debug-verilog', action='store_true',
@@ -296,11 +299,15 @@ def top_level_cli(
 
     if args.action == CliAction.Build:
 
+        nextpnr_opts = "--timing-allow-fail"
+        if args.nextpnr_seed is not None:
+            nextpnr_opts += f" --seed {args.nextpnr_seed}"
+
         build_flags = {
             "build_dir": build_path,
             "verbose": args.verbose,
             "debug_verilog": args.debug_verilog,
-            "nextpnr_opts": "--timing-allow-fail",
+            "nextpnr_opts": nextpnr_opts,
             "ecppack_opts": f"--freq 38.8 --compress --bootaddr {args.bootaddr}"
         }
 

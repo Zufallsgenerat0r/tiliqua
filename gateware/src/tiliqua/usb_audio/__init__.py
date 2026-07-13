@@ -56,10 +56,28 @@ class USB2AudioInterface(wiring.Component):
 
     """ USB Audio Class v2 interface """
 
-    def __init__(self, *, audio_clock: pll.AudioClock, nr_channels):
+    def __init__(self, *, audio_clock: pll.AudioClock, nr_channels,
+                 serial="beta-0000", bcd_device=0.01, spatial_channel_config=False):
         self.fs = 192000 if audio_clock.is_192khz() else 48000
         self.nr_channels = nr_channels
+        self.serial = serial
+        self.bcd_device = bcd_device
+        if spatial_channel_config:
+            # Claim a spatial position for every channel (FL, FR, ...) on all
+            # descriptors that want one. Some hosts show nicer channel names
+            # with this, but e.g. Windows applies speaker-layout processing
+            # to claimed channels in shared mode, so it is opt-in.
+            self.channel_config = (1 << nr_channels) - 1
+            self.input_alt_channel_config = self.channel_config
+        else:
+            self.channel_config = 0
+            # Windows wants a stereo pair on the active input alternate
+            # setting to automatically recognize and use this interface.
+            self.input_alt_channel_config = 0x3
         self.max_packet_size = int(32 * (self.fs // 48000) * self.nr_channels)
+        # HS isochronous transactions are limited to 1024 bytes/microframe.
+        assert self.max_packet_size <= 1024, \
+            f"{nr_channels}ch @ {self.fs}Hz needs {self.max_packet_size}B packets (>1024B HS iso limit)"
         super().__init__({
             "i":  In(stream.Signature(data.ArrayLayout(eurorack_pmod.ASQ, self.nr_channels))),
             "o": Out(stream.Signature(data.ArrayLayout(eurorack_pmod.ASQ, self.nr_channels))),
@@ -83,8 +101,8 @@ class USB2AudioInterface(wiring.Component):
 
             d.iManufacturer      = "apf.audio"
             d.iProduct           = "Tiliqua"
-            d.iSerialNumber      = "beta-0000"
-            d.bcdDevice          = 0.01
+            d.iSerialNumber      = self.serial
+            d.bcdDevice          = self.bcd_device
 
             d.bNumConfigurations = 1
 
@@ -125,11 +143,8 @@ class USB2AudioInterface(wiring.Component):
         inputTerminal               = uac2.InputTerminalDescriptorEmitter()
         inputTerminal.bTerminalID   = 2
         inputTerminal.wTerminalType = uac2.USBTerminalTypes.USB_STREAMING
-        # The number of channels needs to be 2 here in order to be recognized
-        # default audio out device by Windows. We provide an alternate
-        # setting with the full channel count, which also references
-        # this terminal ID
         inputTerminal.bNrChannels   = self.nr_channels
+        inputTerminal.bmChannelConfig = self.channel_config
         inputTerminal.bCSourceID    = 1
         audioControlInterface.add_subordinate_descriptor(inputTerminal)
 
@@ -146,6 +161,7 @@ class USB2AudioInterface(wiring.Component):
         inputTerminal.bTerminalID   = 4
         inputTerminal.wTerminalType = uac2.InputTerminalTypes.MICROPHONE
         inputTerminal.bNrChannels   = self.nr_channels
+        inputTerminal.bmChannelConfig = self.channel_config
         inputTerminal.bCSourceID    = 1
         audioControlInterface.add_subordinate_descriptor(inputTerminal)
 
@@ -174,6 +190,7 @@ class USB2AudioInterface(wiring.Component):
         audioStreamingInterface.bFormatType   = uac2.FormatTypes.FORMAT_TYPE_I
         audioStreamingInterface.bmFormats     = uac2.TypeIFormats.PCM
         audioStreamingInterface.bNrChannels   = nr_channels
+        audioStreamingInterface.bmChannelConfig = self.channel_config
         c.add_subordinate_descriptor(audioStreamingInterface)
 
         # AudioStreaming Interface Descriptor (Type I)
@@ -216,13 +233,10 @@ class USB2AudioInterface(wiring.Component):
         quietAudioStreamingInterface.bAlternateSetting = 0
         c.add_subordinate_descriptor(quietAudioStreamingInterface)
 
-        # we need the default alternate setting to be stereo
-        # out for windows to automatically recognize
-        # and use this audio interface
         self.create_output_streaming_interface(c, nr_channels=self.nr_channels, alt_setting_nr=1)
 
 
-    def create_input_streaming_interface(self, c, *, nr_channels, alt_setting_nr, channel_config=0):
+    def create_input_streaming_interface(self, c, *, nr_channels, alt_setting_nr):
         # Interface Descriptor (Streaming, IN, active setting)
         activeAudioStreamingInterface = uac2.AudioStreamingInterfaceDescriptorEmitter()
         activeAudioStreamingInterface.bInterfaceNumber  = 2
@@ -236,7 +250,7 @@ class USB2AudioInterface(wiring.Component):
         audioStreamingInterface.bFormatType     = uac2.FormatTypes.FORMAT_TYPE_I
         audioStreamingInterface.bmFormats       = uac2.TypeIFormats.PCM
         audioStreamingInterface.bNrChannels     = nr_channels
-        audioStreamingInterface.bmChannelConfig = channel_config
+        audioStreamingInterface.bmChannelConfig = self.input_alt_channel_config
         c.add_subordinate_descriptor(audioStreamingInterface)
 
         # AudioStreaming Interface Descriptor (Type I)
@@ -269,8 +283,7 @@ class USB2AudioInterface(wiring.Component):
         quietAudioStreamingInterface.bAlternateSetting = 0
         c.add_subordinate_descriptor(quietAudioStreamingInterface)
 
-        # Windows wants a stereo pair as default setting, so let's have it
-        self.create_input_streaming_interface(c, nr_channels=self.nr_channels, alt_setting_nr=1, channel_config=0x3)
+        self.create_input_streaming_interface(c, nr_channels=self.nr_channels, alt_setting_nr=1)
 
     def elaborate(self, platform):
         m = Module()
@@ -312,8 +325,10 @@ class USB2AudioInterface(wiring.Component):
             max_packet_size=self.max_packet_size)
         usb.add_endpoint(ep2_in)
 
-        # calculate bytes in frame for audio in
-        audio_in_frame_bytes = Signal(range(self.max_packet_size), reset=24 * self.nr_channels)
+        # calculate bytes in frame for audio in (nominal rate until the first
+        # OUT packet arrives and the measured value takes over)
+        audio_in_frame_bytes = Signal(range(self.max_packet_size),
+                                      reset=24 * (self.fs // 48000) * self.nr_channels)
         audio_in_frame_bytes_counting = Signal()
 
         with m.If(ep1_out.stream.valid & ep1_out.stream.ready):
@@ -397,8 +412,6 @@ class USB2AudioInterface(wiring.Component):
                 m.d.usb += audio_in_seen.eq(1)
 
             return audio_in_active
-
-            usb_audio_in_active  = detect_active_audio_in(m, "usb", usb, ep2_in)
 
         usb_audio_in_active = detect_active_audio_in(m, "usb", usb, ep2_in)
 

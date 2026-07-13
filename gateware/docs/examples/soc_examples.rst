@@ -34,6 +34,12 @@ sampler
 ^^^^^^^^
 .. automodule:: top.sampler.top
 
+.. _usb_audio_soc:
+
+usb_audio_soc
+^^^^^^^^^^^^^
+.. automodule:: top.usb_audio_soc.top
+
 .. _selftest:
 
 selftest
