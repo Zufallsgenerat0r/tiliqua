@@ -2,6 +2,7 @@ use opts::*;
 use strum_macros::{EnumIter, IntoStaticStr};
 use tiliqua_lib::palette::ColorPalette;
 pub use tiliqua_lib::scope::{Timebase, VScale};
+pub use tiliqua_lib::spectrum::FreqScale;
 use tiliqua_hal::dma_framebuffer::Rotate;
 use tiliqua_pac::constants::AUDIO_FS;
 use serde_derive::{Serialize, Deserialize};
@@ -17,6 +18,8 @@ pub enum Page {
     Misc,
     Scope1,
     Scope2,
+    // Appended last so persisted Page discriminants stay stable.
+    Spectrum,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, EnumIter, IntoStaticStr, Serialize, Deserialize)]
@@ -49,6 +52,8 @@ pub enum PlotType {
     Vector,
     #[default]
     Scope,
+    // Appended last so persisted PlotType discriminants stay stable.
+    Spectrum,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, EnumIter, IntoStaticStr, Serialize, Deserialize)]
@@ -97,6 +102,7 @@ int_params!(TriggerLvlParams<i16> { step: 500, min: -16000, max: 16000, format: 
 int_params!(PosParams<i16>       { step: 1, min: -40, max: 40, format: IntFormat::Scaled { divisor: 4, precision: 2, suffix: "d" } });
 int_params!(ScrollParams<u8>      { step: 1, min: 0, max: 125 });
 int_params!(NChannelsParams<u8>   { step: 1, min: 1, max: 4 });
+int_params!(SmoothParams<u8>      { step: 1, min: 0, max: 15 });
 
 button_params!(OneShotButtonParams { mode: ButtonMode::OneShot });
 
@@ -204,6 +210,22 @@ pub struct ScopeOpts2 {
     pub hue: IntOption<HueParams>,
 }
 
+#[derive(OptionPage, Clone)]
+pub struct SpectrumOpts {
+    #[option]
+    pub freq_scale: EnumOption<FreqScale>,
+    #[option(8)]
+    pub smooth: IntOption<SmoothParams>,
+    #[option(VScale::Scale2V)]
+    pub gain: EnumOption<VScale>,
+    #[option(0)]
+    pub ypos: IntOption<PosParams>,
+    #[option(8)]
+    pub intensity: IntOption<IntensityParams>,
+    #[option(10)]
+    pub hue: IntOption<HueParams>,
+}
+
 #[derive(Options, Clone)]
 pub struct Opts {
     pub tracker: ScreenTracker<Page>,
@@ -222,4 +244,6 @@ pub struct Opts {
     pub delay: DelayOpts,
     #[page(Page::Beam)]
     pub beam: BeamOpts,
+    #[page(Page::Spectrum)]
+    pub spectrum: SpectrumOpts,
 }

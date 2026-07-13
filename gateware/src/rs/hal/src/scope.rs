@@ -24,8 +24,32 @@ macro_rules! impl_scope {
             }
 
             pub fn set_timebase(&mut self, tb: tiliqua_lib::scope::Timebase) {
+                let Some(t_div_us) = tb.t_div_us() else { return };
                 let numer: u64 = (self.px_div_x as u64) * (1u64 << (15 + self.xscale as u32));
-                let raw = (numer * 1_000_000 / (self.fs_up as u64 * tb.t_div_us())) as u32;
+                let raw = (numer * 1_000_000 / (self.fs_up as u64 * t_div_us)) as u32;
+                self.registers.timebase().write(|w| unsafe { w.timebase().bits(raw) });
+            }
+
+            pub fn fs_up(&self) -> u32 {
+                self.fs_up
+            }
+
+            pub fn measured_period_samples(&self) -> u32 {
+                self.registers.period_samples().read().period_samples().bits()
+            }
+
+            pub fn trigger_count(&self) -> u32 {
+                self.registers.trigger_count().read().trigger_count().bits()
+            }
+
+            /// Drive the `timebase` register so that `period_samples` upsampled
+            /// samples map to one full input cycle == 10 visible divisions at
+            /// the current xscale. Matches the existing manual-mode semantics
+            /// (Auto picks the perfect `t_div_us`), so xzoom keeps working.
+            pub fn set_period_samples(&mut self, period_samples: u32) {
+                if period_samples == 0 { return; }
+                let numer: u64 = (self.px_div_x as u64) * (1u64 << (15 + self.xscale as u32)) * 10;
+                let raw = (numer / period_samples as u64) as u32;
                 self.registers.timebase().write(|w| unsafe { w.timebase().bits(raw) });
             }
 

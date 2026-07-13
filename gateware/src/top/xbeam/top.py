@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: CERN-OHL-S-2.0
 
 """
-Vectorscope/oscilloscope with menu system, USB audio and tunable delay lines.
+Vectorscope/oscilloscope/spectrum analyzer with menu system, USB audio and tunable delay lines.
 
     - In **vectorscope mode**, rasterize X/Y, intensity and color to a simulated
       CRT, with adjustable beam settings, scale and offset for each channel.
@@ -11,16 +11,20 @@ Vectorscope/oscilloscope with menu system, USB audio and tunable delay lines.
     - In **oscilloscope mode**, all 4 input channels are plotted simultaneosly
       with adjustable timebase, trigger settings and so on.
 
+    - In **spectrum mode**, channel 0 is run through an FFT and plotted as a
+      live spectrum (0 to 12kHz analysis bandwidth, 256-point STFT) with
+      adjustable envelope smoothing and a linear or logarithmic frequency axis.
+
 The channels are assigned as follows:
 
     .. code-block:: text
 
-                 Vectorscope │ Oscilloscope
-        ┌────┐               │
-        │in0 │◄─ x           │ channel 0 + trig
-        │in1 │◄─ y           │ channel 1
-        │in2 │◄─ intensity   │ channel 2
-        │in3 │◄─ color       │ channel 3
+                 Vectorscope │ Oscilloscope    │ Spectrum
+        ┌────┐               │                 │
+        │in0 │◄─ x           │ channel 0 + trig│ analyzed channel
+        │in1 │◄─ y           │ channel 1       │ -
+        │in2 │◄─ intensity   │ channel 2       │ -
+        │in3 │◄─ color       │ channel 3       │ -
         └────┘
 
 A USB audio interface, tunable delay lines, and series of switches is included
@@ -111,7 +115,7 @@ can also be used to control most of these through CCs as follows:
         BEAM    grid          44  grid overlay style
         BEAM    grid-i        45  grid overlay intensity
 
-        MISC    plot-type     50  vectorscope or oscilloscope
+        MISC    plot-type     50  vectorscope, oscilloscope or spectrum
         MISC    plot-src      51  plot inputs or outputs
         MISC    usb-mode       -  enable/bypass USB audio
         MISC    rotation      52  screen rotation
@@ -133,6 +137,13 @@ can also be used to control most of these through CCs as follows:
         SCOPE2  trig-lvl      74  trigger level
         SCOPE2  intensity     75  trace intensity
         SCOPE2  hue           76  trace color
+
+        SPECTRUM freq-scale   80  linear or log frequency axis
+        SPECTRUM smooth       81  envelope smoothing (high = slow)
+        SPECTRUM gain         82  magnitude scale
+        SPECTRUM ypos         83  baseline vertical position
+        SPECTRUM intensity    84  trace intensity
+        SPECTRUM hue          85  trace color
 
     .. note::
 
@@ -260,7 +271,7 @@ class XbeamSoc(TiliquaSoc):
 
     # Stored in manifest and used by bootloader for brief summary of each bitstream.
     bitstream_help = BitstreamHelp(
-        brief="Scope / Vectorscope / USB audio.",
+        brief="Scope / Vectorscope / Spectrum / USB audio.",
         io_left=['x / in0', 'y / in1', 'intensity / in2', 'color / in3', 'out0', 'out1', 'out2', 'out3'],
         io_right=['navigate menu', '4x4 audio device', 'video out', '', '', '']
     )
@@ -279,6 +290,7 @@ class XbeamSoc(TiliquaSoc):
         self.scope_periph_base  = 0x00001100
         self.xbeam_periph_base  = 0x00001200
         self.overlay_periph_base = 0x00001300
+        self.spectrum_periph_base = 0x00001400
 
         # Dedicated framebuffer plotter for scope peripherals (5 ports: 1 vector + 4 scope channels)
         self.plotter = FramebufferPlotter(
@@ -303,6 +315,13 @@ class XbeamSoc(TiliquaSoc):
         # Grid overlay peripheral
         self.csr_decoder.add(self.overlay_periph.bus, addr=self.overlay_periph_base, name="overlay_periph")
 
+        # Spectrum analyzer with CSR registers. sz=256 leaves enough routing
+        # headroom to close dvi_clk timing on the LFE5U-25F; sz=512 was
+        # marginally failing next to everything else in this design.
+        self.spectrum_periph = scope.SpectrumPeripheral(
+            fs=self.clock_settings.audio_clock.fs(), sz=256)
+        self.csr_decoder.add(self.spectrum_periph.bus, addr=self.spectrum_periph_base, name="spectrum_periph")
+
         # now we can freeze the memory map
         self.finalize_csr_bridge()
 
@@ -318,6 +337,7 @@ class XbeamSoc(TiliquaSoc):
         m.submodules.scope_periph = self.scope_periph
         m.submodules.xbeam_periph = self.xbeam_periph
         m.submodules.overlay_periph = self.overlay_periph
+        m.submodules.spectrum_periph = self.spectrum_periph
 
         # Connect vector/scope pixel requests to plotter channels
         wiring.connect(m, self.vector_periph.o, self.plotter.i[0])
@@ -365,9 +385,19 @@ class XbeamSoc(TiliquaSoc):
         with m.Else():
             dsp.connect_peek(m, pmod0.o_cal, plot_fifo.i)
 
+        # Route plot samples either directly to the upsamplers, or through
+        # the spectrum analyzer first (which emits axis/magnitude samples).
+        m.submodules.up_split4 = up_split4 = dsp.Split(n_channels=4, shape=PSQ)
+        with m.If(self.spectrum_periph.soc_en):
+            wiring.connect(m, plot_fifo.o, self.spectrum_periph.i)
+            wiring.connect(m, self.spectrum_periph.o, up_split4.i)
+        with m.Else():
+            wiring.connect(m, plot_fifo.o, up_split4.i)
+            # Drain any in-flight spectrum samples while it is hidden.
+            m.d.comb += self.spectrum_periph.o.ready.eq(1)
+
         # Upsample all 4 channels before routing to scope/vector peripherals
         fs = self.clock_settings.audio_clock.fs()
-        m.submodules.up_split4 = up_split4 = dsp.Split(n_channels=4, source=plot_fifo.o, shape=PSQ)
         m.submodules.up_merge4 = up_merge4 = dsp.Merge(n_channels=4, shape=PSQ)
         for ch in range(4):
             r = dsp.Resample(fs_in=fs, n_up=self.n_upsample, m_down=1, shape=PSQ)
