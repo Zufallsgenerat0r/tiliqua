@@ -12,6 +12,7 @@ This board needs a ``TLQ-MODULE`` or any FPGA board that has a PMOD port in orde
 
 - **Expander for TLQ-MODULE**
     - Add more audio channels to Tiliqua, by plugging it into either the ``ex0`` or ``ex1`` PMOD expansion ports. An example of instantiating extra audio channels inside Tiliqua bitstreams can be found in the :class:`TRIPLE-MIRROR <top.dsp.top.TripleMirror>` example project.
+    - The :ref:`usb_audio_soc` bitstream turns Tiliqua plus one expander into an 8in/8out USB2 sound card (12in/12out with two expanders), with menu-controlled routing of every output jack and USB capture channel.
     - **NEW:** I now have an experimental build called ``xbeam-ex`` which is similar to ``xbeam``, but exposes a 12in/12out USB interface, expecting 1 or 2 expanders connected. `See here for detailed instructions <https://github.com/apfaudio/tiliqua/issues/155>`_ !
 - **Audio IO for different FPGA board**
     - **For Amaranth:** I would suggest re-using the ``EurorackPmod`` component in ``src/tiliqua/periph/eurorack_pmod.py``. It has drivers for every chip on this board. You can use it in the same way as the :class:`TRIPLE-MIRROR <top.dsp.top.TripleMirror>` example linked above, on any FPGA board.

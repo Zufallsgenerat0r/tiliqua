@@ -409,7 +409,8 @@ class TiliquaSoc(Component):
                 m.d.comb += platform.request("mobo_leds_oe").o.eq(1),
 
             # Connect encoder button to RebootProvider
-            m.submodules.reboot = reboot = RebootProvider(self.clock_settings.frequencies.sync)
+            # (exposed as self.reboot so subclasses can mute extra codecs on reboot)
+            m.submodules.reboot = self.reboot = reboot = RebootProvider(self.clock_settings.frequencies.sync)
             m.d.comb += reboot.button.eq(self.encoder0._button.f.button.r_data)
             m.d.comb += self.pmod0_periph.mute.eq(reboot.mute)
         else:
